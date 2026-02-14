@@ -3,172 +3,200 @@
 """
 AUTHOR
 
-    Sébastien Le Maguer <sebastien.lemaguer@adaptcentre.ie>
+    Sébastien Le Maguer <sebastien.lemaguer@helsinki.fi>
 
 DESCRIPTION
 
 LICENSE
     This script is in the public domain, free from copyrights or restrictions.
-    Created: 23 April 2020
+    Created: 21 January 2026
 """
 
-# System/default
-import sys
-import os
-
-# Arguments
+# Core Python
+import pathlib
 import argparse
-
-# Messaging/logging
-import traceback
-import time
-import logging
-
-# data
-import pandas as pd
-
-# Regexp
 import re
 
-# Zip
-from zipfile import ZipFile
+# Messaging/logging
+import logging
+from logging.config import dictConfig
+try:
+    import pythonjsonlogger
+    JSON_LOGGER = True
+except Exception:
+    JSON_LOGGER = False
 
-# Image
+#
+import pandas as pd
+from zipfile import ZipFile
 from PIL import Image
 
 ###############################################################################
 # global constants
 ###############################################################################
-LEVEL = [logging.INFO, logging.DEBUG]
+LEVEL = [logging.WARNING, logging.INFO, logging.DEBUG]
 
 ###############################################################################
 # Functions
 ###############################################################################
+def configure_logger(args) -> logging.Logger:
+    """Setup the global logging configurations and instanciate a specific logger for the current script
+
+    Parameters
+    ----------
+    args : dict
+        The arguments given to the script
+
+    Returns
+    --------
+    the logger: logger.Logger
+    """
+    # create logger and formatter
+    logger = logging.getLogger()
+
+    # Verbose level => logging level
+    log_level = args.verbosity
+    if args.verbosity >= len(LEVEL):
+        log_level = len(LEVEL) - 1
+        # logging.warning("verbosity level is too high, I'm gonna assume you're taking the highest (%d)" % log_level)
+
+    # Define the default logger configuration
+    logging_config = dict(
+        version=1,
+        disable_existing_logger=True,
+        formatters={
+            "f": {
+                "format": "[%(asctime)s] [%(levelname)s] — [%(name)s — %(funcName)s:%(lineno)d] %(message)s",
+                "datefmt": "%d/%b/%Y: %H:%M:%S ",
+            }
+        },
+        handlers={
+            "h": {
+                "class": "logging.StreamHandler",
+                "formatter": "f",
+                "level": LEVEL[log_level],
+            }
+        },
+        root={"handlers": ["h"], "level": LEVEL[log_level]},
+    )
+
+    # Add file handler if file logging required
+    if args.log_file is not None:
+        cur_formatter_key = "f"
+        if JSON_LOGGER:
+            logging_config["formatters"]["j"] = {
+                '()': 'pythonjsonlogger.json.JsonFormatter',
+                'fmt': '%(asctime)s %(levelname)s %(filename)s %(lineno)d %(message)s',
+                'rename_fields': {'asctime': 'time', 'levelname': 'level', 'lineno': 'line_number'}
+            }
+            cur_formatter_key = "j"
+
+        logging_config["handlers"]["f"] = {
+            "class": "logging.FileHandler",
+            "formatter": cur_formatter_key,
+            "level": LEVEL[log_level],
+            "filename": args.log_file,
+        }
+        logging_config["root"]["handlers"] = ["h", "f"]
+
+    # Setup logging configuration
+    dictConfig(logging_config)
+
+    # Retrieve and return the logger dedicated to the script
+    logger = logging.getLogger(__name__)
+    return logger
+
+
+def define_argument_parser() -> argparse.ArgumentParser:
+    """Defines the argument parser
+
+    Returns
+    --------
+    The argument parser: argparse.ArgumentParser
+    """
+    parser = argparse.ArgumentParser(description="")
+
+    # Add logging options
+    parser.add_argument("-l", "--log_file", default=None, help="Logger file")
+    parser.add_argument(
+        "-v",
+        "--verbosity",
+        action="count",
+        default=0,
+        help="increase output verbosity",
+    )
+
+
+    # Add performative options
+    parser.add_argument("-s", "--separator", default="\t", help="The separator of the CSV/TSV/PSV/... files")
+
+    # Add arguments
+    parser.add_argument("input_csv", help="The CSV file which contains the meta-information")
+    parser.add_argument("input_dir", help="The directory containing the zip files downloaded from bandcamp")
+    parser.add_argument("output_dir", help="The root directory which will contain the music unpacked and organized")
+
+    # Return parser
+    return parser
 
 
 ###############################################################################
-# Main function
+# Entry point
 ###############################################################################
 def main():
-    """Main entry function
-    """
-    global args
+    # Initialization of the argument parser and the logger
+    arg_parser = define_argument_parser()
+    args = arg_parser.parse_args()
+    logger = configure_logger(args)
 
+    input_dir = pathlib.Path(args.input_dir)
+    output_dir = pathlib.Path(args.output_dir)
     df = pd.read_csv(args.input_csv, sep=args.separator)
 
     for r in df.iterrows():
-        logger.info("Import \"%s\" from \"%s\"" % (r[1]["Artist"], r[1]["Album"]))
+        logger.info(f"Import \"{r[1]['Artist']}\" from \"{r[1]['Album']}\"")
 
         # Generate directory
-        album_dir = "%s/%s/%s - %s" % (args.output_dir, r[1]["Artist"], r[1]["Year"], r[1]["Album"])
+        album_dir = output_dir/f"{r[1]['Artist']}/{r[1]['Year']} - {r[1]['Album']}"
         logger.debug("")
-        logger.debug("Create directory \"%s\"" % album_dir)
-        os.makedirs(album_dir, exist_ok=True)
+        logger.debug(f"Create directory \"{album_dir}\"")
+        album_dir.mkdir(exist_ok=True, parents=True)
 
         # Extract zip
-        zip_file = "%s/%s - %s.zip" % (args.input_dir, r[1]["Artist"], r[1]["Album"])
-        logger.debug("Extract \"%s\"" % zip_file)
+        zip_file = input_dir/f"{r[1]['Artist']} - {r[1]['Album']}.zip"
+        logger.debug(f"Extract \"{zip_file}\"")
         with ZipFile(zip_file, 'r') as zipObj:
             zipObj.extractall(album_dir)
 
         # Rename file
-        for track in os.listdir(album_dir):
-            if not track.endswith(".flac"):
-                continue
-
-            m = re.search("([0-9]{2}) (.*.flac)", track)
+        for track in album_dir.glob('*.flac'):
+            m = re.search("([0-9]{2}) (.*)", track.stem)
             if m is None:
-                raise Exception("Bad format for track \"%s\"" % track)
-            filename = "%s - %s" % (m[1], m[2])
+                raise Exception(f"Bad format for track \"{track}\"")
+            filename = f"{m[1]} - {m[2]}.flac"
 
-            logger.debug("Rename track \"%s\" -> \"%s\"" % (track, filename))
-            os.rename(os.path.join(album_dir, track),
-                      os.path.join(album_dir, filename))
+            logger.debug(f"Rename track \"{track.name}\" -> \"{filename}\"")
+            track.rename(album_dir/filename)
 
         # Generate proper covers
         try:
-            image = Image.open('%s/cover.jpg' % album_dir)
+            image = Image.open(f'{album_dir}/cover.jpg')
         except FileNotFoundError:
-            image = Image.open('%s/cover.png' % album_dir)
+            image = Image.open(f'{album_dir}/cover.png')
 
         image = image.convert("RGB")
 
         image = image.resize((120, 120))
-        image.save('%s/cover_med.jpg' % album_dir)
+        image.save(f'{album_dir}/cover_med.jpg')
 
         image = image.resize((60, 60))
-        image.save('%s/cover_small.jpg' % album_dir)
+        image.save(f'{album_dir}/cover_small.jpg')
 
 
         logger.debug("")
         logger.debug("===============================================================")
 
 ###############################################################################
-#  Envelopping
+# Wrapping for directly calling the scripts
 ###############################################################################
-if __name__ == '__main__':
-    try:
-        parser = argparse.ArgumentParser(description="")
-
-        # Add options
-        parser.add_argument("-l", "--log_file", default=None,
-                            help="Logger file")
-        parser.add_argument("-s", "--separator", default="\t",
-                            help="")
-        parser.add_argument("-v", "--verbosity", action="count", default=0,
-                            help="increase output verbosity")
-
-        # Add arguments
-        parser.add_argument("input_csv", help="The CSV file which contains the meta-information")
-        parser.add_argument("input_dir", help="The directory containing the zip files downloaded from bandcamp")
-        parser.add_argument("output_dir", help="The root directory which will contain the music unpacked and organized")
-
-        # Parsing arguments
-        args = parser.parse_args()
-
-        # create logger and formatter
-        logger = logging.getLogger()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-        # Verbose level => logging level
-        log_level = args.verbosity
-        if (args.verbosity >= len(LEVEL)):
-            log_level = len(LEVEL) - 1
-            logger.setLevel(log_level)
-            logger.warning("verbosity level is too high, I'm gonna assume you're taking the highest (%d)" % log_level)
-        else:
-            logger.setLevel(LEVEL[log_level])
-
-        # create console handler
-        ch = logging.StreamHandler()
-        ch.setFormatter(formatter)
-        logger.addHandler(ch)
-
-        # create file handler
-        if args.log_file is not None:
-            fh = logging.FileHandler(args.log_file)
-            logger.addHandler(fh)
-
-        # Debug time
-        start_time = time.time()
-        logger.debug("start time = " + time.asctime())
-
-        # Running main function <=> run application
-        main()
-
-        # Debug time
-        logger.debug("end time = " + time.asctime())
-        logger.debug('TOTAL TIME IN MINUTES: %02.2f' %
-                     ((time.time() - start_time) / 60.0))
-
-        # Exit program
-        sys.exit(0)
-    except KeyboardInterrupt as e:  # Ctrl-C
-        raise e
-    except SystemExit:  # sys.exit()
-        pass
-    except Exception as e:
-        logging.error('ERROR, UNEXPECTED EXCEPTION')
-        logging.error(str(e))
-        traceback.print_exc(file=sys.stderr)
-        sys.exit(-1)
+if __name__ == "__main__":
+    main()
